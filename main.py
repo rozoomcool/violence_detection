@@ -1,61 +1,105 @@
 import cv2
 import numpy as np
 import tensorflow as tf
-from keras.src.saving import load_model
+from keras import Model
+from keras.src.applications.inception_v3 import InceptionV3
+from tensorflow.keras.layers import TimeDistributed, Dense, Dropout, GlobalAveragePooling2D, LSTM
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import Input
+import threading
 
-# from tensorflow.keras.models import load_model
 
-# Загрузка обученной модели
-model = load_model('action_recognition_model.keras')  # Укажите путь к вашей модели
+# Функция для сборки модели
+def build_model():
+    base_model = InceptionV3(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+    base_model.trainable = False  # Замораживаем веса базы модели
 
-# Список классов (например, действия)
-actions = ["Нормальное", "Драка", "Драка с оружием"]
+    # Входная последовательность из 16 кадров
+    inputs = Input(shape=(16, 224, 224, 3))
 
-# Параметры видеопотока
-cap = cv2.VideoCapture(0)  # Используем камеру (0 - это встроенная камера)
+    # Применяем TimeDistributed для обработки каждого кадра через базовую модель
+    x = TimeDistributed(base_model)(inputs)
+    x = TimeDistributed(GlobalAveragePooling2D())(x)
+
+    # Добавляем LSTM для обработки временной информации
+    x = LSTM(128, return_sequences=False)(x)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.5)(x)
+    outputs = Dense(3, activation='softmax')(x)  # 3 класса
+
+    model = Model(inputs, outputs)
+    model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+
+# Загрузка модели
+model = build_model()
+
+# Классы действий
+actions = ["NORMAL", "Violence", "Weaponized"]
+action = actions[0]
+
+# Видеопоток с камеры
+cap = cv2.VideoCapture(0)
 sequence = []
-SEQ_LENGTH = 16  # Длина последовательности кадров
+SEQ_LENGTH = 16  # Последовательность из 16 кадров
+PROCESS_FRAME_RATE = 5  # Обрабатываем только каждый 5-ый кадр
 
+# Флаг и блокировка для многопоточности
+lock = threading.Lock()
+frame_processed = False
+
+
+# Функция предобработки кадров
 def preprocess_frame(frame):
-    # Изменение размера кадра до 224x224 и нормализация
     frame = cv2.resize(frame, (224, 224))
     frame = frame.astype('float32') / 255.0
     return frame
 
+
+# Функция для распознавания действий в отдельном потоке
+def run_inference(sequence):
+    global action, frame_processed
+    input_data = np.expand_dims(sequence, axis=0)  # (1, 16, 224, 224, 3)
+
+    # Выполняем предсказание
+    preds = model.predict(input_data)[0]
+
+    # Определяем действие с максимальной вероятностью
+    with lock:
+        action = actions[np.argmax(preds)]
+        frame_processed = True
+
+
+frame_count = 0
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Предобработка кадра
+    # Предобработка текущего кадра
     preprocessed_frame = preprocess_frame(frame)
 
+    frame_count += 1
     # Добавляем кадр в последовательность
-    sequence.append(preprocessed_frame)
+    if frame_count % PROCESS_FRAME_RATE == 0:
+        sequence.append(preprocessed_frame)
+
+    # Если последовательность заполнена, запускаем инференс в отдельном потоке
     if len(sequence) == SEQ_LENGTH:
-        # Преобразуем последовательность в нужную форму (batch_size, SEQ_LENGTH, 224, 224, 3)
-        input_data = np.expand_dims(sequence, axis=0)
+        threading.Thread(target=run_inference, args=(sequence,)).start()
+        sequence = []  # Очищаем последовательность для следующего анализа
 
-        # Выполняем предсказание
-        preds = model.predict(input_data)[0]
-
-        # Получаем индекс класса с максимальной вероятностью
-        action = actions[np.argmax(preds)]
-
-        # Выводим распознанное действие
+    # Отображаем результат
+    with lock:
         cv2.putText(frame, f'Action: {action}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Сбрасываем последовательность
-        sequence = []
-
-    # Отображаем кадр
     cv2.imshow('Action Recognition', frame)
 
-    # Выход из программы при нажатии клавиши 'q'
+    # Выход при нажатии 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 # Освобождаем ресурсы
 cap.release()
 cv2.destroyAllWindows()
-
