@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import load_model
+from keras.src.saving import load_model
+
+# from tensorflow.keras.models import load_model
 
 # Загрузка обученной модели
 model = load_model('action_recognition_model.keras')  # Укажите путь к вашей модели
